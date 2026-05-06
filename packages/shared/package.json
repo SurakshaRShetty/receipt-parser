@@ -1,0 +1,12 @@
+{
+  "name": "@receipt-parser/shared",
+  "version": "0.1.0",
+  "main": "./src/types.ts",
+  "types": "./src/types.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}
