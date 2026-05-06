@@ -4,7 +4,7 @@
 
 ```bash
 cp .env.example .env
-# Add your ANTHROPIC_API_KEY to .env
+# Add your GROQ_API_KEY to .env (free at console.groq.com → API Keys)
 
 npm install
 npm run dev
@@ -12,48 +12,48 @@ npm run dev
 
 Open http://localhost:5173
 
-**Required env var:** `ANTHROPIC_API_KEY` — get one at console.anthropic.com.  
+**Required env var:** `GROQ_API_KEY` — free account at [console.groq.com](https://console.groq.com), then create an API key.  
 Optional: `PORT` (default 3001), `UPLOADS_DIR` (default `./uploads`), `DB_PATH` (default `./receipts.db`).
 
 ---
 
 ## 1. What did you build?
 
-A local web app that accepts a receipt photo (JPEG, PNG, WebP), sends it to Claude claude-sonnet-4-6 via the Anthropic vision API, and returns structured data — merchant, date, line items with categories, and total. The result view lets the user correct any field inline; changes are auto-saved with an 800 ms debounce. Low-confidence fields are highlighted so the user knows where to focus. Receipts persist in SQLite. The project is a TypeScript monorepo: a shared types package, an Express backend, and a React + Vite frontend.
+A local web app that accepts a receipt photo (JPEG, PNG, WebP), sends it to Groq's Llama 4 Scout vision model, and returns structured data — merchant, date, line items with categories, and total. The result view lets the user correct any field inline; changes are auto-saved with an 800 ms debounce. Low-confidence fields are highlighted on load and the badge clears once the user edits that field. The last viewed receipt is persisted in localStorage and restored on page reload. Receipts persist in SQLite. The project is a TypeScript monorepo: a shared types package (`@receipt-parser/shared`), an Express backend, and a React + Vite frontend.
 
 ---
 
 ## 2. Biggest tradeoffs
 
-**Everything is a line item, including taxes and tips.** The alternative — only storing "purchased items" — seems cleaner until you try to reconcile the sum with the total. Taxes and discounts are real lines on the receipt; dropping them breaks the sum-check that helps users catch extraction errors. The `category` field (`item | tax | tip | discount | subtotal | fee | total`) discriminates them without losing them.
+**Everything is a line item, including taxes and tips.** The alternative — only storing purchased items — seems cleaner until you try to display a meaningful subtotal. Taxes, discounts, and subtotals are real lines on the receipt; dropping them means the data no longer matches what the user sees in the image. The `category` field (`item | tax | tip | discount | subtotal | fee | total`) discriminates them without losing them. The UI sums only `item`-category rows as "Items subtotal" and shows the grand total separately — this avoids double-counting intermediate rows like "Taxable Amount" that some receipts include.
 
-**Two-stage parse recovery instead of retrying Claude.** On malformed LLM output I strip markdown fences, then extract the first `{...}` block, then Zod-parse with `.default()` on every field. This handles ~95% of real-world formatting quirks without a second API call. I only set `parse_error` status when `JSON.parse` itself fails — and even then I return a partial receipt so the user can fill in manually rather than facing a blank error screen. The cost: a retry would occasionally produce better structured output. The benefit: half the latency and half the API cost on flaky responses.
+**Two-stage parse recovery instead of retrying on failure.** On malformed LLM output I strip markdown fences, extract the first `{...}` block, then Zod-parse with `.default()` on every field. This handles the majority of real-world formatting quirks without a second API call. `parse_error` status is only set when `JSON.parse` itself fails — and even then a partial receipt is returned so the user can fill in manually rather than facing a blank screen. The cost: a retry would occasionally produce better output. The benefit: lower latency and no wasted API quota on flaky responses.
 
-**SQLite blobs for line items, not a normalized table.** Line items are stored as a JSON column because the receipt is always read and written as a unit — there's no query that needs to join on individual items. A normalized schema would add complexity with no query benefit. If analytics ever need it, SQLite's `json_each` handles it without a migration.
+**SQLite blobs for line items, not a normalized table.** Line items are stored as a JSON column because the receipt is always read and written as a unit — there is no query that needs to join on individual items. A normalized schema would add complexity with no query benefit.
 
 ---
 
 ## 3. Where I used an LLM
 
-- **Claude Code** — used throughout for scaffolding, component structure, and iterating on the parser pipeline. I directed every architectural decision and reviewed every file; Claude wrote the boilerplate.
-- **Claude claude-sonnet-4-6** (in the product itself) — the vision parsing step. I wrote the prompt and the Zod schema that validates its output.
-- I wrote the core logic myself: the two-stage parse recovery pipeline, the Zod defaults strategy, the auto-save + optimistic rollback design, and the total/sum mismatch check.
+- **Claude Code** — used throughout for scaffolding, component structure, and iterating on the parser pipeline. I directed every architectural decision and reviewed every file.
+- **Groq / Llama 4 Scout** (in the product itself) — the vision parsing step. I wrote the prompt, the category classification rules, and the Zod schema that validates and normalizes the output.
+- I wrote the core logic myself: the two-stage parse recovery pipeline, the Zod defaults strategy, the auto-save + optimistic rollback design, and the confidence-flag UX.
 
 ---
 
 ## 4. What I'd do with another week
 
-1. **Receipt history sidebar** — the API already returns `GET /api/receipts`; surfacing it in the UI with thumbnails would make the app actually useful for reviewing past receipts.
-2. **Confidence heatmap on the image** — Claude can return bounding boxes with `tool_use`. Overlaying low-confidence regions on the original image would let users spot extraction errors at a glance instead of reading through the field list.
-3. **Export to CSV/JSON** — trivial to add to the backend, high user value.
-4. **Retry with a tighter prompt** on `parse_error` — currently I surface the raw text; a second call with "here is the raw text, structure it as JSON" would recover most cases.
-5. **Delete receipt** — noted in spec pushback below.
+1. **Receipt history sidebar** — the API already exposes `GET /api/receipts`; surfacing it in the UI with thumbnails would make the app useful for reviewing past receipts, not just the most recent one.
+2. **Export to CSV/JSON** — trivial to add to the backend, high user value for anyone processing receipts in bulk.
+3. **Retry with a stricter prompt on `parse_error`** — currently the raw LLM text is surfaced to the user; a second call asking the model to re-structure its own output would recover most cases automatically.
+4. **Delete receipt** — noted in the pushback below.
+5. **Switch to a paid vision model** — Llama 4 Scout is free and capable, but a model with stronger OCR on low-quality or handwritten receipts (e.g. GPT-4o or Claude claude-sonnet-4-6) would reduce the number of fields the user has to correct.
 
 ---
 
 ## 5. One thing I'd push back on
 
-"Saved receipts persist somewhere" implies persistence is a checkbox feature. It isn't — it's a data lifecycle question with no answer in the spec. Right now receipts accumulate in SQLite forever with no way to delete or archive them. A user who uploads 50 test receipts while calibrating their workflow has no way to clean up. A simple delete action is not an "another week" feature; it's part of the minimum useful product. I'd push to scope it in before calling v1 done.
+"Saved receipts persist somewhere" implies persistence is a checkbox feature. It isn't — it's a data lifecycle question. Right now receipts accumulate in SQLite indefinitely with no way to delete or archive them. A user who uploads a dozen test receipts while getting started has no way to clean up. A delete action is not an "another week" item; it's part of the minimum useful product and I'd push to scope it in before calling v1 done.
 
 ---
 
@@ -63,4 +63,4 @@ A local web app that accepts a receipt photo (JPEG, PNG, WebP), sends it to Clau
 npm test
 ```
 
-Eight unit tests covering the parser pipeline (no API key required).
+Eight unit tests covering the parser pipeline — no API key required.
